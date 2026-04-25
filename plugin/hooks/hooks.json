@@ -1,0 +1,17 @@
+{
+  "description": "Sprintra Claude Code plugin hooks — auto-inject project briefing on every session start",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/session-start.js\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

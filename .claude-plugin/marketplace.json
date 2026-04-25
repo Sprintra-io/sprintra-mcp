@@ -1,0 +1,21 @@
+{
+  "name": "sprintra",
+  "owner": {
+    "name": "Sprintra",
+    "email": "support@sprintra.io",
+    "url": "https://sprintra.io"
+  },
+  "metadata": {
+    "description": "AI-native project management for Claude Code — persistent memory, sprint planning, decision traceability.",
+    "homepage": "https://sprintra.io",
+    "repository": "https://github.com/Sprintra-io/sprintra-mcp"
+  },
+  "plugins": [
+    {
+      "name": "sprintra",
+      "version": "1.1.0",
+      "source": "./plugin",
+      "description": "Persistent project memory + sprint planning + 20 MCP tools. Auto-injects project briefing on every Claude Code session — no more 'tell Claude what we're working on' ritual."
+    }
+  ]
+}

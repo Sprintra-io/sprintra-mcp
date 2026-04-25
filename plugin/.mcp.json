@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "sprintra": {
+      "type": "http",
+      "url": "https://api.sprintra.io/api/mcp",
+      "headers": {
+        "Authorization": "Bearer ${SPRINTRA_TOKEN}"
+      }
+    }
+  }
+}
