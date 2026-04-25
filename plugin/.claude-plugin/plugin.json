@@ -1,6 +1,6 @@
 {
   "name": "sprintra",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Persistent project memory for Claude Code — auto-inject sprint state, decisions, and last session context at every session start. Plus 6 PM workflow skills (capture, decide, sprint review, standup, wrap) and the full Sprintra MCP server (20 consolidated tools) for managing projects through natural conversation.",
   "author": {
     "name": "Sprintra",

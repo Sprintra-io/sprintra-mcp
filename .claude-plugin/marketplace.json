@@ -13,7 +13,7 @@
   "plugins": [
     {
       "name": "sprintra",
-      "version": "1.1.0",
+      "version": "1.2.0",
       "source": "./plugin",
       "description": "Persistent project memory + sprint planning + 20 MCP tools. Auto-injects project briefing on every Claude Code session — no more 'tell Claude what we're working on' ritual."
     }
