@@ -13,9 +13,9 @@
   "plugins": [
     {
       "name": "sprintra",
-      "version": "1.2.0",
+      "version": "1.2.1",
       "source": "./plugin",
-      "description": "Persistent project memory + sprint planning + 20 MCP tools. Auto-injects project briefing on every Claude Code session — no more 'tell Claude what we're working on' ritual."
+      "description": "Persistent project memory + auto-capture for Claude Code. SessionStart briefing + PostToolUse capture + Stop summary = pick up exactly where you left off, even after Ctrl+C or compaction. Plus 6 PM skills and 17 MCP tools."
     }
   ]
 }

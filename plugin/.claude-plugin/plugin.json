@@ -1,14 +1,14 @@
 {
   "name": "sprintra",
-  "version": "1.2.0",
-  "description": "Persistent project memory for Claude Code — auto-inject sprint state, decisions, and last session context at every session start. Plus 6 PM workflow skills (capture, decide, sprint review, standup, wrap) and the full Sprintra MCP server (20 consolidated tools) for managing projects through natural conversation.",
+  "version": "1.2.1",
+  "description": "Persistent project memory for Claude Code with full session-recovery loop. SessionStart auto-injects a compact briefing, PostToolUse captures every Claude Code tool call (project + user scoped), Stop summarizes the session, SessionEnd cleans up. Survives Ctrl+C and reconnect — pick up exactly where you left off. Includes 6 PM workflow skills and the Sprintra MCP server (17 consolidated tools).",
   "author": {
     "name": "Sprintra",
     "email": "support@sprintra.io",
     "url": "https://sprintra.io"
   },
   "homepage": "https://sprintra.io/docs/getting-started",
-  "repository": "https://github.com/ravindra240385/VibePilot",
+  "repository": "https://github.com/Sprintra-io/sprintra-mcp",
   "license": "MIT",
   "keywords": [
     "memory",

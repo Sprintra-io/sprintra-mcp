@@ -1,31 +1,40 @@
 # Sprintra — Claude Code Plugin
 
-AI-native project management skills for [Sprintra](https://sprintra.io). Plan features, track sprints, record architecture decisions, and generate standup reports — all through natural conversation with your AI coding assistant.
+Persistent project memory and full session-recovery loop for [Sprintra](https://sprintra.io). Plan features, track sprints, record architecture decisions, and **never lose your place** — every Claude Code session auto-loads project state on startup and auto-captures what happened so the next session picks up exactly where you left off.
 
 ## Installation
 
 ```bash
 # Add the Sprintra marketplace (one-time)
-/plugin marketplace add ravindra240385/VibePilot
+/plugin marketplace add Sprintra-io/sprintra-mcp
 
 # Install the plugin
-/plugin install sprintra
-```
-
-Or test locally:
-```bash
-claude --plugin-dir ./packages/claude-plugin
+/plugin install sprintra@sprintra
 ```
 
 ## Setup
 
 1. Sign up at [app.sprintra.io](https://app.sprintra.io)
 2. Go to Settings → Agents → Create Token
-3. Set your token as an environment variable:
+3. Save the token (the `sprintra` CLI stores it at `~/.sprintra/config.json`):
    ```bash
-   export SPRINTRA_TOKEN="vp_your_token_here"
+   echo "vp_your_token_here" | npx @sprintra/cli@latest login
    ```
-4. The plugin auto-connects to Sprintra via MCP
+   Or set it as an env var: `export SPRINTRA_TOKEN="vp_..."`
+4. In your project root, run `mcp__vibepilot__work_sessions generate_claude_md` (or let the agent do it) to drop a `.sprintra/project.json` marker so hooks know which project this directory belongs to.
+
+## Memory Layer Hooks (the magic)
+
+Four hooks form the session-recovery loop:
+
+| Hook | When it fires | What it does |
+|------|---------------|--------------|
+| **SessionStart** | Claude Code launches, `/clear`, or auto-compaction | Fetches a ~250-token project briefing (active sprint, WIP stories, last session summary, recent decisions) and injects it into the agent's context. Zero manual context loading. |
+| **PostToolUse** | After every tool call (Read, Edit, Write, Bash, MCP, …) | Logs the action to `agent_actions` with project + user attribution. Skips Sprintra's own MCP self-calls to avoid noise. Fire-and-forget, 5s hard timeout — never blocks the agent. |
+| **Stop** | Session pauses (Ctrl+C, `/clear`, compact) | Asks the API to summarize the session window into a single readable note. The next SessionStart picks it up as "Last session". |
+| **SessionEnd** | Claude Code shuts down cleanly | Final cleanup. |
+
+All hooks silently no-op if Sprintra is unreachable. They are designed to **never** block your agent.
 
 ## Skills Included
 
