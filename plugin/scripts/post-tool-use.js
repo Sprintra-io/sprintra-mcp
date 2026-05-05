@@ -146,11 +146,22 @@ async function phase6Path({ ctx, toolName, toolInput, toolResponse, sessionId, c
     extra_payload: { last_tool: toolName },
   }).catch(() => {});
 
-  // Async drain (best effort — don't block hook)
+  // Drain pending events. We AWAIT this (not fire-and-forget) because Node
+  // exits as soon as the hook's main() returns, cutting off any in-flight
+  // HTTP. Cap at 1 batch (max 50 events) and 3s race-timeout so hook always
+  // returns within budget. Older pending events drain on subsequent hook fires.
   if (ctx?.apiUrl && ctx?.token) {
-    drainBuffer({ apiUrl: ctx.apiUrl, token: ctx.token, maxBatches: 2 })
-      .then((r) => debug("post-tool-use", `drained ${r.accepted}/${r.drained}`))
-      .catch(() => {});
+    try {
+      const result = await Promise.race([
+        drainBuffer({ apiUrl: ctx.apiUrl, token: ctx.token, maxBatches: 1 }),
+        new Promise((resolve) =>
+          setTimeout(() => resolve({ drained: 0, accepted: 0, rejected: 0, halted_reason: "hook_timeout" }), 3000),
+        ),
+      ]);
+      debug("post-tool-use", `drained ${result.accepted}/${result.drained}${result.halted_reason ? ` (${result.halted_reason})` : ""}`);
+    } catch (e) {
+      debug("post-tool-use", `drain error: ${e.message}`);
+    }
   }
   return true;
 }

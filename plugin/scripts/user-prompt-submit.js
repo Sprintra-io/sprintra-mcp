@@ -143,10 +143,21 @@ export async function main() {
             captured_at: Date.now(),
           },
         });
+        // AWAIT drain (not fire-and-forget) — Node exits before async drain
+        // completes, otherwise. Cap at 1 batch + 3s race-timeout so hook
+        // always returns within budget. Older events catch up next hook fire.
         if (ctx?.apiUrl && ctx?.token) {
-          drainBuffer({ apiUrl: ctx.apiUrl, token: ctx.token, maxBatches: 2 })
-            .then((r) => debug("user-prompt-submit", `drained ${r.accepted}/${r.drained}`))
-            .catch(() => {});
+          try {
+            const result = await Promise.race([
+              drainBuffer({ apiUrl: ctx.apiUrl, token: ctx.token, maxBatches: 1 }),
+              new Promise((resolve) =>
+                setTimeout(() => resolve({ drained: 0, accepted: 0, rejected: 0, halted_reason: "hook_timeout" }), 3000),
+              ),
+            ]);
+            debug("user-prompt-submit", `drained ${result.accepted}/${result.drained}${result.halted_reason ? ` (${result.halted_reason})` : ""}`);
+          } catch (e) {
+            debug("user-prompt-submit", `drain error: ${e.message}`);
+          }
         }
         return;
       } catch (e) {
