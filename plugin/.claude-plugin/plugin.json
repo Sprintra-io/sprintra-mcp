@@ -1,7 +1,7 @@
 {
   "name": "sprintra",
-  "version": "1.2.1",
-  "description": "Persistent project memory for Claude Code with full session-recovery loop. SessionStart auto-injects a compact briefing, PostToolUse captures every Claude Code tool call (project + user scoped), Stop summarizes the session, SessionEnd cleans up. Survives Ctrl+C and reconnect — pick up exactly where you left off. Includes 6 PM workflow skills and the Sprintra MCP server (17 consolidated tools).",
+  "version": "1.4.0",
+  "description": "Persistent project memory for Claude Code with Memory Layer Phase 6 (continuous capture) — opt-in via phase6_enabled flag. Local SQLite buffer survives Wi-Fi flaps + crashes; redacts secrets before disk write; auto-attaches unmarked repos; recovers crashed sessions from local transcripts. Plus all v1.3 features: SessionStart briefing, UserPromptSubmit + PostToolUse capture, Stop digest, SessionEnd cleanup, 6 PM workflow skills.",
   "author": {
     "name": "Sprintra",
     "email": "support@sprintra.io",

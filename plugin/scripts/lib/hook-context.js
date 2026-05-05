@@ -19,7 +19,16 @@ import { homedir } from "node:os";
 export const LOCAL_API = "http://127.0.0.1:4000";
 export const PROD_API = "https://api.sprintra.io";
 export const HEALTH_PROBE_MS = 400;
-export const CONFIG_FILE = join(homedir(), ".sprintra", "config.json");
+// Computed lazily so tests can override $HOME between cases.
+// Honor $HOME env first (test-overridable) then fall back to os.homedir().
+function getHome() {
+  return process.env.HOME || homedir();
+}
+export function configFilePath() {
+  return join(getHome(), ".sprintra", "config.json");
+}
+// Back-compat (deprecated — use configFilePath() in new code)
+export const CONFIG_FILE = configFilePath();
 
 export function debug(prefix, ...args) {
   if (process.env.SPRINTRA_DEBUG) console.error(`[sprintra-${prefix}]`, ...args);
@@ -74,11 +83,47 @@ export async function findProjectMarker(startDir) {
 /** Read ~/.sprintra/config.json. Returns {} on any failure. */
 export async function readStoredConfig() {
   try {
-    const raw = await readFile(CONFIG_FILE, "utf-8");
+    const raw = await readFile(configFilePath(), "utf-8");
     return JSON.parse(raw) || {};
   } catch {
     return {};
   }
+}
+
+/**
+ * Check if Memory Layer Phase 6 (continuous capture) is enabled for this user.
+ *
+ * Default: false in v1.4.0 (30-day alpha bake), flips to true in v1.5.0.
+ * Sources, in order of precedence:
+ *   1. SPRINTRA_PHASE6 env var ("true"/"false")
+ *   2. config.phase6_enabled in ~/.sprintra/config.json
+ *   3. default: false
+ *
+ * Story: VP-1305.
+ */
+export async function isPhase6Enabled() {
+  if (process.env.SPRINTRA_PHASE6 === "true") return true;
+  if (process.env.SPRINTRA_PHASE6 === "false") return false;
+  const stored = await readStoredConfig();
+  if (typeof stored.phase6_enabled === "boolean") return stored.phase6_enabled;
+  return false; // safe default: legacy HTTP-direct path
+}
+
+/**
+ * Detect whether the host IDE supports Phase 6 hooks.
+ * Phase 6 is Claude Code primary; other IDEs degraded; Claude Desktop disabled.
+ *
+ * Source: process.env.CLAUDE_CODE_VERSION is set by Claude Code.
+ * Claude Desktop sets different env vars and doesn't fire most hooks anyway.
+ */
+export function detectIdeSource() {
+  if (process.env.CLAUDE_CODE_VERSION) return "claude_code";
+  if (process.env.CURSOR_TRACE_ID || process.env.CURSOR) return "cursor";
+  if (process.env.CODEX_HOME) return "codex";
+  if (process.env.GEMINI_API_KEY && !process.env.CLAUDE_CODE_VERSION) return "gemini_cli";
+  // Claude Desktop sets CLAUDE_DESKTOP — explicitly disable Phase 6 there
+  if (process.env.CLAUDE_DESKTOP) return "claude_desktop_disabled";
+  return "unknown";
 }
 
 /** Probe local API. Returns true if /api/health responds in <400ms. */

@@ -55,7 +55,32 @@ export async function fetchBriefing(apiUrl, projectId, token) {
 }
 
 const TIMEOUT_MS = 8000;
-const HARD_KILL_MS = 9000;
+const HARD_KILL_MS = 11000; // VP-1232: leaves headroom for git sync (3s) + briefing (8s)
+const GIT_SYNC_TIMEOUT_MS = 3000; // VP-1232: short timeout — never block briefing on sync
+
+/**
+ * VP-1232 — best-effort git sync before briefing fetch. Keeps git_commits table
+ * fresh so the briefing's "Recent commits" section reflects today's work
+ * instead of whatever was last synced (could be 50+ days stale).
+ *
+ * Silent on all failures: not a git repo, repo without origin, API down,
+ * timeout, etc. Briefing always fetches even if sync fails.
+ */
+async function syncGitBeforeBriefing(apiUrl, projectId, token) {
+  try {
+    const url = `${apiUrl.replace(/\/$/, "")}/api/projects/${encodeURIComponent(projectId)}/git/sync`;
+    const headers = { "Content-Type": "application/json", accept: "application/json" };
+    if (token) headers.authorization = `Bearer ${token}`;
+    const res = await httpRequest("POST", url, headers, "{}", GIT_SYNC_TIMEOUT_MS);
+    if (res?.ok) {
+      debug("session-start", `git sync ok: ${res.body?.slice(0, 80) || "no body"}`);
+    } else {
+      debug("session-start", `git sync http status: ${res?.status ?? "no-response"} — continuing`);
+    }
+  } catch (e) {
+    debug("session-start", `git sync error: ${e.message} — continuing`);
+  }
+}
 
 export function frameBriefing(briefing, source) {
   const lines = [];
@@ -80,6 +105,14 @@ export async function main() {
 
   const { project, apiUrl, token, identity } = ctx;
   debug("session-start", `api=${apiUrl} token=${token ? "set" : "none"} project=${project.project_id} user=${identity.email || "anonymous"}`);
+
+  // VP-1232: opt-out via stored config — most users want auto-sync
+  const skipGitSync = ctx.stored?.skip_git_sync === true;
+  if (!skipGitSync) {
+    await syncGitBeforeBriefing(apiUrl, project.project_id, token);
+  } else {
+    debug("session-start", "git sync skipped via config (skip_git_sync=true)");
+  }
 
   const url = `${apiUrl.replace(/\/$/, "")}/api/projects/${encodeURIComponent(project.project_id)}/briefing`;
   const headers = { accept: "text/markdown" };
