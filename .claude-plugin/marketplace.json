@@ -13,9 +13,9 @@
   "plugins": [
     {
       "name": "sprintra",
-      "version": "1.2.1",
+      "version": "1.4.0",
       "source": "./plugin",
-      "description": "Persistent project memory + auto-capture for Claude Code. SessionStart briefing + PostToolUse capture + Stop summary = pick up exactly where you left off, even after Ctrl+C or compaction. Plus 6 PM skills and 17 MCP tools."
+      "description": "Memory Layer Phase 6 — opt-in continuous capture. Local SQLite buffer survives Wi-Fi flaps + crashes; redacts secrets before disk; auto-attaches unmarked repos; recovers crashed sessions from local transcripts. Plus SessionStart briefing, UserPromptSubmit + PostToolUse capture, Stop digest, 6 PM skills, 20 MCP tools."
     }
   ]
 }
