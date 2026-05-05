@@ -16,7 +16,13 @@ import { mkdir, stat } from "node:fs/promises";
 import { homedir, platform } from "node:os";
 import { join, dirname } from "node:path";
 import { randomUUID } from "node:crypto";
-import Database from "better-sqlite3";
+import { createRequire } from "node:module";
+
+// Use createRequire so ESM module resolution honors NODE_PATH set by the
+// hooks.json wrapper (which points to the npm-installed @sprintra/plugin's
+// node_modules where better-sqlite3 actually lives).
+const require_ = createRequire(import.meta.url);
+const Database = require_("better-sqlite3");
 
 // ────────────────────────────────────────────────────────────────────────────
 // Constants
