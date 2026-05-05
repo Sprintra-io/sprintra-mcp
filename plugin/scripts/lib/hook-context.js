@@ -93,11 +93,17 @@ export async function readStoredConfig() {
 /**
  * Check if Memory Layer Phase 6 (continuous capture) is enabled for this user.
  *
- * Default: false in v1.4.0 (30-day alpha bake), flips to true in v1.5.0.
+ * Default in v1.5.0+: TRUE. Phase 6 is now the default capture path. Users
+ * can explicitly opt out via SPRINTRA_PHASE6=false or config.phase6_enabled=false
+ * if they want the legacy v1.3 HTTP-direct path.
+ *
  * Sources, in order of precedence:
  *   1. SPRINTRA_PHASE6 env var ("true"/"false")
  *   2. config.phase6_enabled in ~/.sprintra/config.json
- *   3. default: false
+ *   3. default: true (v1.5.0+)
+ *
+ * Phase 6 gracefully degrades to legacy if better-sqlite3 isn't available
+ * (lazy-loaded via dynamic import), so flipping the default is safe.
  *
  * Story: VP-1305.
  */
@@ -106,7 +112,7 @@ export async function isPhase6Enabled() {
   if (process.env.SPRINTRA_PHASE6 === "false") return false;
   const stored = await readStoredConfig();
   if (typeof stored.phase6_enabled === "boolean") return stored.phase6_enabled;
-  return false; // safe default: legacy HTTP-direct path
+  return true; // v1.5.0: Phase 6 on by default; falls through to legacy if deps unavailable
 }
 
 /**

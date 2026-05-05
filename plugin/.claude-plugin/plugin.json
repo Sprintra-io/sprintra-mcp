@@ -1,7 +1,7 @@
 {
   "name": "sprintra",
-  "version": "1.4.0",
-  "description": "Persistent project memory for Claude Code with Memory Layer Phase 6 (continuous capture) — opt-in via phase6_enabled flag. Local SQLite buffer survives Wi-Fi flaps + crashes; redacts secrets before disk write; auto-attaches unmarked repos; recovers crashed sessions from local transcripts. Plus all v1.3 features: SessionStart briefing, UserPromptSubmit + PostToolUse capture, Stop digest, SessionEnd cleanup, 6 PM workflow skills.",
+  "version": "1.5.0",
+  "description": "Persistent project memory for Claude Code with Memory Layer Phase 6 (continuous capture) ENABLED BY DEFAULT. Local SQLite buffer survives Wi-Fi flaps + crashes; redacts secrets before disk write; auto-attaches unmarked repos; recovers crashed sessions from local transcripts. Plus SessionStart briefing, UserPromptSubmit + PostToolUse capture, Stop digest, SessionEnd cleanup, 6 PM workflow skills.",
   "author": {
     "name": "Sprintra",
     "email": "support@sprintra.io",

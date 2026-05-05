@@ -13,9 +13,9 @@
   "plugins": [
     {
       "name": "sprintra",
-      "version": "1.4.0",
+      "version": "1.5.0",
       "source": "./plugin",
-      "description": "Memory Layer Phase 6 — opt-in continuous capture. Local SQLite buffer survives Wi-Fi flaps + crashes; redacts secrets before disk; auto-attaches unmarked repos; recovers crashed sessions from local transcripts. Plus SessionStart briefing, UserPromptSubmit + PostToolUse capture, Stop digest, 6 PM skills, 20 MCP tools."
+      "description": "Memory Layer Phase 6 ENABLED BY DEFAULT. Local SQLite buffer survives Wi-Fi flaps + crashes; redacts secrets before disk; auto-attaches unmarked repos; recovers crashed sessions from local transcripts. Plus SessionStart briefing, UserPromptSubmit + PostToolUse capture, Stop digest, 6 PM skills, 20 MCP tools."
     }
   ]
 }
