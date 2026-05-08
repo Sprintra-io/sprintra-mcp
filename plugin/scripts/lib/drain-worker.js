@@ -20,8 +20,14 @@ import {
   nackBatch,
   getBufferStats,
   openBuffer,
+  // VP-1307 — Phase 7 Memory Layer (dec-RQtOzDnr)
+  claimSessionDigestBatch,
+  ackSessionDigestBatch,
+  nackSessionDigestBatch,
+  cacheSessionDigestEmbedding,
+  listDigestsNeedingEmbedding,
 } from "./buffer-sqlite.js";
-import { httpRequest } from "./hook-context.js";
+import { httpRequest, isStrictLocalMemory } from "./hook-context.js";
 import {
   recordFailureAndMaybeWarn,
   recordDrainSuccess,
@@ -184,6 +190,15 @@ export async function drainBuffer({
   batchSize = DEFAULT_BATCH_SIZE,
   maxBatches = DEFAULT_MAX_BATCHES_PER_DRAIN,
 } = {}) {
+  // VP-1310 — strict-local-memory gate. When the user has opted out of
+  // memory-layer cloud egress, we MUST NOT POST events to /api/events/batch.
+  // Events stay in the local buffer (subject to retention caps); PM cloud
+  // sync via MCP tools is unaffected (this gate is scoped to memory-layer
+  // egress only).
+  if (await isStrictLocalMemory()) {
+    return { drained: 0, accepted: 0, rejected: 0, halted_reason: "strict_local_memory" };
+  }
+
   await ensureDrainLockColumns();
 
   // Try to acquire drain lock — if another hook is already draining, exit
@@ -243,6 +258,215 @@ export async function drainBuffer({
     drained: totalDrained,
     accepted: totalAccepted,
     rejected: totalRejected,
+    halted_reason: haltedReason,
+  };
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// VP-1307 — Phase 7 Memory Layer (dec-RQtOzDnr)
+//
+// Session-digest drain + embedding back-fill.
+//
+// Flow per row:
+//   1. Claim a batch of pending local digests
+//   2. POST each to /api/projects/:projectId/work-sessions/:wsId/digest
+//      (the same endpoint Agent B's hook would have used directly, but
+//       the local-first buffer means we go through the buffer instead)
+//   3. On 2xx: ack locally, then (unless private) fetch a vector via
+//      /api/embed and BLOB-cache it on the local row
+//   4. On network failure: nack — embedding back-fill retries next pass
+// ────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Build the embedding-input text from the digest payload. Mirrors what the
+ * cloud digest route uses for indexEntity / embedEntity so the cached vector
+ * stays comparable across local and cloud lookups.
+ */
+function digestEmbedText(payload) {
+  if (!payload || typeof payload !== "object") return "";
+  const parts = [
+    payload.what_was_discussed || "",
+    payload.reasoning_summary || "",
+    Array.isArray(payload.frustration_signals)
+      ? payload.frustration_signals.join(" ")
+      : "",
+  ];
+  return parts.filter(Boolean).join(" ").slice(0, 3000);
+}
+
+/**
+ * Upload one digest to the cloud. Returns {ok, reason?}.
+ * Endpoint shape mirrors the existing session_digests POST contract.
+ */
+async function uploadDigest(row, { apiUrl, token }) {
+  if (!apiUrl || !token) return { ok: false, reason: "no_auth" };
+  if (!row.project_id || !row.work_session_id) {
+    return { ok: false, reason: "missing_routing_keys" };
+  }
+
+  const payload = tryParseJson(row.payload_json) || {};
+  const url = `${apiUrl}/api/projects/${encodeURIComponent(row.project_id)}/work-sessions/${encodeURIComponent(row.work_session_id)}/digest`;
+  const res = await httpRequest(
+    "POST",
+    url,
+    {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    {
+      ...payload,
+      claude_session_id: row.claude_session_id ?? payload.claude_session_id ?? null,
+    },
+    8000,
+  );
+
+  if (!res) return { ok: false, reason: "network_error" };
+  if (res.status === 401 || res.status === 403) return { ok: false, reason: "auth_failed" };
+  if (res.status >= 500) return { ok: false, reason: "server_error" };
+  if (res.status >= 400) return { ok: false, reason: `status_${res.status}` };
+  return { ok: true };
+}
+
+/**
+ * Fetch a Gemini-768 vector for the given text from the server-side
+ * /api/embed proxy (which wraps the existing callGeminiEmbedding function
+ * that powers search.semantic). Returns a Buffer (Float32 LE) or null.
+ *
+ * Network failures, missing API key (503), and bad responses all fold to
+ * `null` — the caller treats embedding cache as best-effort and retries
+ * next drain pass.
+ */
+async function fetchEmbedding(text, { apiUrl, token }) {
+  if (!text || !apiUrl || !token) return null;
+  const res = await httpRequest(
+    "POST",
+    `${apiUrl}/api/embed`,
+    {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+      Accept: "application/octet-stream",
+    },
+    { text },
+    8000,
+  );
+  if (!res || !res.ok) return null;
+
+  // httpRequest returns body as string. The /api/embed route ships
+  // raw Float32 LE bytes; restore via latin1 (1:1 byte mapping).
+  // If the underlying fetch returned a non-binary body, length will not
+  // be a multiple of 4 and we'll bail out cleanly.
+  if (typeof res.body !== "string" || !res.body.length) return null;
+  const buf = Buffer.from(res.body, "latin1");
+  if (buf.byteLength === 0 || buf.byteLength % 4 !== 0) return null;
+  return buf;
+}
+
+/**
+ * Drain pending session digests + back-fill cached embeddings.
+ *
+ * Honors the same strict-local-memory gate as drainBuffer — opted-out
+ * users keep digests purely local (no cloud upload, no embedding fetch).
+ *
+ * @param {object} args
+ * @param {string} args.apiUrl
+ * @param {string} args.token
+ * @param {number} [args.batchSize=10]
+ * @param {number} [args.maxBatches=3]
+ * @returns {object} {drained, accepted, rejected, embedded, halted_reason?}
+ */
+export async function drainSessionDigests({
+  apiUrl,
+  token,
+  batchSize = 10,
+  maxBatches = 3,
+} = {}) {
+  if (await isStrictLocalMemory()) {
+    return { drained: 0, accepted: 0, rejected: 0, embedded: 0, halted_reason: "strict_local_memory" };
+  }
+
+  let totalDrained = 0;
+  let totalAccepted = 0;
+  let totalRejected = 0;
+  let totalEmbedded = 0;
+  let haltedReason = null;
+
+  for (let i = 0; i < maxBatches; i++) {
+    let rows = [];
+    try {
+      rows = await claimSessionDigestBatch(batchSize);
+    } catch (err) {
+      haltedReason = "claim_error";
+      break;
+    }
+    if (!rows.length) break;
+    totalDrained += rows.length;
+
+    for (const row of rows) {
+      const upload = await uploadDigest(row, { apiUrl, token });
+      if (!upload.ok) {
+        await nackSessionDigestBatch([row.digest_id], upload.reason ?? "unknown");
+        totalRejected += 1;
+        haltedReason = upload.reason ?? "unknown";
+        // Treat auth + server errors as halt-the-pass (avoid burning retries
+        // on a known-broken upstream); network errors halt similarly.
+        continue;
+      }
+      await ackSessionDigestBatch([row.digest_id]);
+      totalAccepted += 1;
+
+      // VP-1307 embedding back-fill — strictly best-effort.
+      // Skip private rows (already enforced in cacheSessionDigestEmbedding,
+      // but short-circuit here to avoid burning a Gemini call).
+      if (row.private) continue;
+      // Skip if already cached (idempotent — also enforced lower down).
+      if (row.embedding) continue;
+
+      try {
+        const text = digestEmbedText(tryParseJson(row.payload_json));
+        if (!text) continue;
+        const vec = await fetchEmbedding(text, { apiUrl, token });
+        if (!vec) continue;
+        const r = await cacheSessionDigestEmbedding(row.digest_id, vec);
+        if (r.updated) totalEmbedded += 1;
+      } catch (_err) {
+        // Embedding failure is NEVER fatal — the digest itself is already
+        // synced. We retry on the next drain pass (since `embedding` is
+        // still NULL on the local row).
+      }
+    }
+  }
+
+  // VP-1306 follow-up — back-fill embeddings for already-synced digests that
+  // are missing the BLOB. Covers two cases:
+  //   1. Pre-Phase-7 rows uploaded before the embedding pipeline existed
+  //   2. Rows where embedding fetch failed on first try (network blip)
+  // Capped at 5 rows per pass to keep cost trivial — full backfill of a heavy
+  // user's history takes a handful of sessions, no API budget surprise.
+  if (haltedReason === null) {
+    try {
+      const stale = await listDigestsNeedingEmbedding({ limit: 5 });
+      for (const row of stale) {
+        try {
+          const text = digestEmbedText(tryParseJson(row.payload_json));
+          if (!text) continue;
+          const vec = await fetchEmbedding(text, { apiUrl, token });
+          if (!vec) continue;
+          const r = await cacheSessionDigestEmbedding(row.digest_id, vec);
+          if (r.updated) totalEmbedded += 1;
+        } catch (_err) {
+          // Never fatal — try again next drain pass.
+        }
+      }
+    } catch (_err) {
+      // Listing failed (e.g. DB locked) — non-fatal, retry next drain pass.
+    }
+  }
+
+  return {
+    drained: totalDrained,
+    accepted: totalAccepted,
+    rejected: totalRejected,
+    embedded: totalEmbedded,
     halted_reason: haltedReason,
   };
 }

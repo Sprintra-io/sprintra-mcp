@@ -116,6 +116,34 @@ export async function isPhase6Enabled() {
 }
 
 /**
+ * VP-1310 — strict-local memory mode.
+ *
+ * When true, the Memory Layer egress paths are disabled:
+ *   - drain-worker.js will NOT POST to /api/events/batch
+ *   - SessionStart hook will NOT call the cloud Gemini embedding endpoint
+ *     for "Relevant past observations" lookup
+ *
+ * NOTE: this flag does NOT affect PM cloud sync (decisions, sprints, stories,
+ * features, etc. via MCP tools). It is scoped strictly to the memory-layer
+ * egress paths so users who want local-only observability can still use the
+ * hosted PM features.
+ *
+ * Sources, in order of precedence:
+ *   1. SPRINTRA_STRICT_LOCAL_MEMORY env var ("true"/"false")
+ *   2. config.strict_local_memory in ~/.sprintra/config.json
+ *   3. default: false (cloud sync stays default-on)
+ *
+ * Story: VP-1310. Decisions: dec-RQtOzDnr (privacy gestures).
+ */
+export async function isStrictLocalMemory() {
+  if (process.env.SPRINTRA_STRICT_LOCAL_MEMORY === "true") return true;
+  if (process.env.SPRINTRA_STRICT_LOCAL_MEMORY === "false") return false;
+  const stored = await readStoredConfig();
+  if (typeof stored.strict_local_memory === "boolean") return stored.strict_local_memory;
+  return false;
+}
+
+/**
  * Detect whether the host IDE supports Phase 6 hooks.
  * Phase 6 is Claude Code primary; other IDEs degraded; Claude Desktop disabled.
  *

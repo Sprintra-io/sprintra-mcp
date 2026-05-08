@@ -22,6 +22,7 @@ import {
   installHardTimeout,
   debug,
   isPhase6Enabled,
+  isStrictLocalMemory,
   detectIdeSource,
 } from "./lib/hook-context.js";
 import { redactToolCall } from "./lib/secrets-redactor.js";
@@ -60,6 +61,13 @@ const HARD_KILL_MS = 5500;
 
 /** Legacy v1.3 path — direct HTTP POST. Kept for backward compat. */
 async function legacyPath({ ctx, toolName, toolInput, toolResponse, sessionId, cwd }) {
+  // Memory-layer cloud egress gate (dec-RQtOzDnr). Phase 6 path is gated via
+  // drainBuffer; this legacy fallback POSTs directly to /executions and must
+  // also respect strict_local_memory. PM cloud sync is unaffected.
+  if (await isStrictLocalMemory()) {
+    debug("post-tool-use", "strict_local_memory — skipping legacy executions POST");
+    return;
+  }
   const { project, apiUrl, token, identity } = ctx;
   const metrics = { tool: toolName };
   if (toolInput?.file_path) metrics.file_path = String(toolInput.file_path).slice(0, 200);

@@ -13,7 +13,7 @@
  *   body: { claude_session_id, ended_at }
  */
 
-import { readStdin, resolveContext, httpRequest, installHardTimeout, debug } from "./lib/hook-context.js";
+import { readStdin, resolveContext, httpRequest, isStrictLocalMemory, installHardTimeout, debug } from "./lib/hook-context.js";
 
 const TIMEOUT_MS = 2000;
 const HARD_KILL_MS = 2500;
@@ -24,6 +24,14 @@ export async function main() {
   const sessionId = stdinData.sessionId || null;
   if (!sessionId) {
     debug("session-end", "no sessionId in stdin — silent exit");
+    return;
+  }
+
+  // Memory-layer cloud egress gate (dec-RQtOzDnr). Posts to
+  // /work-sessions/end-by-claude-session — closes a memory-side session.
+  // PM cloud sync (decisions/sprints/stories via MCP) is unaffected.
+  if (await isStrictLocalMemory()) {
+    debug("session-end", "strict_local_memory — skipping end POST");
     return;
   }
 

@@ -24,9 +24,33 @@
 
 import {
   readStdin, resolveContext, httpRequest, installHardTimeout, debug,
-  isPhase6Enabled, detectIdeSource,
+  isPhase6Enabled, isStrictLocalMemory, detectIdeSource,
 } from "./lib/hook-context.js";
 import { redactUserPrompt } from "./lib/secrets-redactor.js";
+
+/**
+ * VP-1310 — privacy gesture: `<private>` prefix.
+ *
+ * If the user's message begins with `<private>` (case-insensitive, leading
+ * whitespace tolerated), the prompt is NOT captured anywhere — no buffer-sqlite
+ * write, no cloud post, no embedding mark. The tag is stripped from the prompt
+ * before Claude sees it so the agent sees only the real instruction.
+ *
+ * This is a per-prompt opt-out. For permanent opt-out use
+ * config.capture_user_prompts=false. For permanent local-only use
+ * config.strict_local_memory=true (VP-1310 server-side gate).
+ */
+const PRIVATE_TAG_RE = /^\s*<private>\s*/i;
+
+export function isPrivatePrompt(prompt) {
+  if (!prompt || typeof prompt !== "string") return false;
+  return PRIVATE_TAG_RE.test(prompt);
+}
+
+export function stripPrivateTag(prompt) {
+  if (!prompt || typeof prompt !== "string") return prompt;
+  return prompt.replace(PRIVATE_TAG_RE, "");
+}
 
 // Phase 6 deps are loaded lazily — better-sqlite3 may not be available in
 // marketplace plugin contexts (no node_modules bundled). Hooks gracefully
@@ -88,6 +112,29 @@ export async function main() {
   // Empty prompt? Nothing to capture.
   if (!prompt || typeof prompt !== "string" || !prompt.trim()) {
     debug("user-prompt-submit", "no prompt text — silent exit");
+    return;
+  }
+
+  // VP-1310 — privacy gesture: prompt prefixed with `<private>` is NEVER captured.
+  // Claude Code's UserPromptSubmit hook contract has no field to rewrite the
+  // prompt itself, so we emit additionalContext telling the agent to treat the
+  // leading <private> marker as metadata and respond to the substance after it.
+  // The capture path is fully short-circuited (no buffer write, no cloud post,
+  // no embedding mark), even when capture_user_prompts=true and Phase 6 is on.
+  if (isPrivatePrompt(prompt)) {
+    const stripped = stripPrivateTag(prompt);
+    debug("user-prompt-submit", "private prompt — skipping capture");
+    const envelope = {
+      hookSpecificOutput: {
+        hookEventName: "UserPromptSubmit",
+        additionalContext:
+          "[sprintra-privacy] The user's message starts with a `<private>` privacy marker. " +
+          "That marker is a metadata gesture — it tells Sprintra not to capture the prompt to memory. " +
+          "Respond to the user's actual request, which is the text AFTER the `<private>` tag:\n\n" +
+          stripped,
+      },
+    };
+    process.stdout.write(JSON.stringify(envelope));
     return;
   }
 
@@ -171,6 +218,14 @@ export async function main() {
   // Legacy path requires resolved context
   if (!ctx) {
     debug("user-prompt-submit", "no project resolved — silent exit (legacy path)");
+    return;
+  }
+
+  // Memory-layer cloud egress gate (dec-RQtOzDnr). Phase 6 path is gated via
+  // drainBuffer; this legacy fallback POSTs directly to /user-prompts and must
+  // also respect strict_local_memory. PM cloud sync is unaffected.
+  if (await isStrictLocalMemory()) {
+    debug("user-prompt-submit", "strict_local_memory — skipping legacy user-prompts POST");
     return;
   }
 

@@ -75,7 +75,7 @@ function isNetworkFilesystem(path) {
 // Schema (versioned migrations)
 // ────────────────────────────────────────────────────────────────────────────
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2; // VP-1306 — added session_digests local mirror
 
 const SCHEMA_V1 = `
   CREATE TABLE IF NOT EXISTS schema_meta (
@@ -131,6 +131,39 @@ const SCHEMA_V1 = `
   INSERT OR IGNORE INTO heartbeat (id) VALUES (1);
 `;
 
+// VP-1306 — Phase 7 Memory Layer (dec-RQtOzDnr).
+// Local mirror of cloud session_digests with a cached embedding for fast
+// brute-force cosine recall at SessionStart. The hook (Agent B) writes
+// these rows; the drain worker uploads them and back-fills `embedding`
+// after a successful POST. `private` rows skip embedding entirely.
+//
+// `state` reuses the same enum as pending_events but with an extra
+// 'embedded' state set after the local cache is populated.
+const SCHEMA_V2_DIGESTS = `
+  CREATE TABLE IF NOT EXISTS session_digests (
+    digest_id TEXT PRIMARY KEY,
+    work_session_id TEXT NOT NULL UNIQUE,
+    project_id TEXT,
+    user_id TEXT,
+    claude_session_id TEXT,
+    payload_json TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    state TEXT NOT NULL DEFAULT '${STATE_PENDING}',
+    claimed_by INTEGER,
+    claimed_at INTEGER,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    private INTEGER NOT NULL DEFAULT 0,
+    embedding BLOB
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_local_digests_state_created
+    ON session_digests(state, created_at);
+
+  CREATE INDEX IF NOT EXISTS idx_local_digests_project_user_created
+    ON session_digests(project_id, user_id, created_at);
+`;
+
 // ────────────────────────────────────────────────────────────────────────────
 // Open / init
 // ────────────────────────────────────────────────────────────────────────────
@@ -167,6 +200,8 @@ export async function openBuffer() {
 
   // Apply schema (idempotent)
   db.exec(SCHEMA_V1);
+  // VP-1306: Phase 7 local digest mirror. Idempotent; safe to run on every open.
+  db.exec(SCHEMA_V2_DIGESTS);
   db.prepare("INSERT OR REPLACE INTO schema_meta (key, value) VALUES (?, ?)").run(
     "version",
     String(SCHEMA_VERSION),
@@ -443,4 +478,225 @@ export async function getBufferStats() {
     consecutive_failures: failures?.consecutive_failures ?? 0,
     dropped_count: failures?.dropped_count ?? 0,
   };
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Session digests — VP-1306 (Phase 7 Memory Layer semantic recall)
+// dec-RQtOzDnr: local-first cache of agent self-summaries with cached vector
+// for brute-force cosine recall at SessionStart.
+// ────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Idempotent upsert. Writes (or refreshes) a digest row in the local mirror.
+ * State stays 'pending' — drain worker will pick it up. Existing embedding,
+ * if any, is preserved; only payload + private flag change.
+ *
+ * @param {object} input
+ * @param {string} input.digest_id
+ * @param {string} input.work_session_id
+ * @param {string} [input.project_id]
+ * @param {string} [input.user_id]
+ * @param {string} [input.claude_session_id]
+ * @param {object} input.payload         - JSON-serializable digest body
+ * @param {boolean} [input.private=false]
+ */
+export async function upsertSessionDigest(input) {
+  const db = await openBuffer();
+  const now = Date.now();
+  const existing = db.prepare(
+    "SELECT digest_id FROM session_digests WHERE work_session_id = ?",
+  ).get(input.work_session_id);
+
+  if (existing) {
+    db.prepare(`
+      UPDATE session_digests
+      SET payload_json = ?,
+          project_id = COALESCE(?, project_id),
+          user_id = COALESCE(?, user_id),
+          claude_session_id = COALESCE(?, claude_session_id),
+          private = ?,
+          state = CASE WHEN state = '${STATE_SYNCED}' THEN '${STATE_PENDING}' ELSE state END
+      WHERE digest_id = ?
+    `).run(
+      JSON.stringify(input.payload),
+      input.project_id ?? null,
+      input.user_id ?? null,
+      input.claude_session_id ?? null,
+      input.private ? 1 : 0,
+      existing.digest_id,
+    );
+    return { ok: true, digest_id: existing.digest_id, updated: true };
+  }
+
+  db.prepare(`
+    INSERT INTO session_digests
+      (digest_id, work_session_id, project_id, user_id, claude_session_id,
+       payload_json, created_at, state, private)
+    VALUES (?, ?, ?, ?, ?, ?, ?, '${STATE_PENDING}', ?)
+  `).run(
+    input.digest_id,
+    input.work_session_id,
+    input.project_id ?? null,
+    input.user_id ?? null,
+    input.claude_session_id ?? null,
+    JSON.stringify(input.payload),
+    now,
+    input.private ? 1 : 0,
+  );
+
+  return { ok: true, digest_id: input.digest_id, updated: false };
+}
+
+/**
+ * Atomically claim up to N pending digests for sync. Returns full rows
+ * with parsed payload. Stale claims older than STALE_CLAIM_MS are reclaimed.
+ */
+export async function claimSessionDigestBatch(limit = 10) {
+  const db = await openBuffer();
+  const now = Date.now();
+  const pid = process.pid;
+
+  // Reclaim stale claims first
+  db.prepare(`
+    UPDATE session_digests
+    SET state = '${STATE_PENDING}', claimed_by = NULL, claimed_at = NULL
+    WHERE state = '${STATE_CLAIMED}' AND claimed_at < ?
+  `).run(now - STALE_CLAIM_MS);
+
+  const claimedIds = db.transaction(() => {
+    const candidates = db.prepare(`
+      SELECT digest_id FROM session_digests
+      WHERE state = '${STATE_PENDING}'
+      ORDER BY created_at ASC
+      LIMIT ?
+    `).all(limit);
+
+    if (candidates.length === 0) return [];
+
+    const placeholders = candidates.map(() => "?").join(",");
+    db.prepare(`
+      UPDATE session_digests
+      SET state = '${STATE_CLAIMED}', claimed_by = ?, claimed_at = ?, attempts = attempts + 1
+      WHERE digest_id IN (${placeholders})
+    `).run(pid, now, ...candidates.map((c) => c.digest_id));
+
+    return candidates.map((c) => c.digest_id);
+  })();
+
+  if (claimedIds.length === 0) return [];
+
+  return db.prepare(`
+    SELECT * FROM session_digests
+    WHERE digest_id IN (${claimedIds.map(() => "?").join(",")})
+  `).all(...claimedIds);
+}
+
+/**
+ * Mark digest rows as successfully synced. Embedding stays untouched —
+ * drain worker fills it in via cacheSessionDigestEmbedding once cloud is
+ * happy.
+ */
+export async function ackSessionDigestBatch(digestIds) {
+  if (!digestIds.length) return;
+  const db = await openBuffer();
+  const placeholders = digestIds.map(() => "?").join(",");
+  db.prepare(`
+    UPDATE session_digests
+    SET state = '${STATE_SYNCED}', last_error = NULL
+    WHERE digest_id IN (${placeholders})
+  `).run(...digestIds);
+}
+
+/**
+ * Mark digest rows as failed. Past max attempts → terminal STATE_FAILED.
+ */
+export async function nackSessionDigestBatch(digestIds, error, maxAttempts = 5) {
+  if (!digestIds.length) return;
+  const db = await openBuffer();
+  const placeholders = digestIds.map(() => "?").join(",");
+  db.prepare(`
+    UPDATE session_digests
+    SET
+      state = CASE WHEN attempts >= ? THEN '${STATE_FAILED}' ELSE '${STATE_PENDING}' END,
+      claimed_by = NULL,
+      claimed_at = NULL,
+      last_error = ?
+    WHERE digest_id IN (${placeholders})
+  `).run(maxAttempts, String(error).slice(0, 500), ...digestIds);
+}
+
+/**
+ * Cache the Gemini embedding (Float32 LE Buffer) for a digest row.
+ * Idempotent: NO-OP if private=true; NO-OP if a vector is already cached.
+ *
+ * @param {string} digestId
+ * @param {Buffer} embedding - Float32 LE payload
+ * @returns {{ updated: boolean, reason?: string }}
+ */
+export async function cacheSessionDigestEmbedding(digestId, embedding) {
+  const db = await openBuffer();
+  const row = db.prepare(
+    "SELECT private, embedding FROM session_digests WHERE digest_id = ?",
+  ).get(digestId);
+  if (!row) return { updated: false, reason: "not_found" };
+  if (row.private) return { updated: false, reason: "private" };
+  if (row.embedding) return { updated: false, reason: "already_cached" };
+  if (!Buffer.isBuffer(embedding) || embedding.byteLength === 0) {
+    return { updated: false, reason: "invalid_embedding" };
+  }
+  db.prepare("UPDATE session_digests SET embedding = ? WHERE digest_id = ?")
+    .run(embedding, digestId);
+  return { updated: true };
+}
+
+/**
+ * List digests for a project/user, optionally filtered to those with cached
+ * vectors (for semantic recall at SessionStart).
+ *
+ * @param {object} args
+ * @param {string} [args.project_id]
+ * @param {string} [args.user_id]
+ * @param {boolean} [args.only_with_embedding=false]
+ * @param {number}  [args.limit=200]
+ */
+export async function listSessionDigests(args = {}) {
+  const db = await openBuffer();
+  const where = [];
+  const params = [];
+  if (args.project_id) { where.push("project_id = ?"); params.push(args.project_id); }
+  if (args.user_id)    { where.push("user_id = ?");    params.push(args.user_id); }
+  if (args.only_with_embedding) where.push("embedding IS NOT NULL");
+  // Never return private digests through this read path.
+  where.push("private = 0");
+  const sql = `
+    SELECT digest_id, work_session_id, project_id, user_id, claude_session_id,
+           payload_json, created_at, embedding
+    FROM session_digests
+    ${where.length ? "WHERE " + where.join(" AND ") : ""}
+    ORDER BY created_at DESC
+    LIMIT ?
+  `;
+  params.push(args.limit ?? 200);
+  return db.prepare(sql).all(...params);
+}
+
+/**
+ * VP-1306 follow-up — list digests that need embedding back-fill.
+ *
+ * Returns rows where `embedding IS NULL AND private = 0`. Used by the drain
+ * worker's background back-fill pass to embed digests that were synced before
+ * Phase 7 (or where embedding fetch failed on first try). Capped per pass.
+ *
+ * @param {object} args
+ * @param {number} [args.limit=5]
+ */
+export async function listDigestsNeedingEmbedding({ limit = 5 } = {}) {
+  const db = await openBuffer();
+  return db.prepare(`
+    SELECT digest_id, payload_json
+    FROM session_digests
+    WHERE embedding IS NULL AND private = 0
+    ORDER BY created_at DESC
+    LIMIT ?
+  `).all(limit);
 }

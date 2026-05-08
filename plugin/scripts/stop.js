@@ -17,7 +17,7 @@
  * "Last session" or "Recent notes" section.
  */
 
-import { readStdin, resolveContext, httpRequest, installHardTimeout, debug } from "./lib/hook-context.js";
+import { readStdin, resolveContext, httpRequest, isStrictLocalMemory, installHardTimeout, debug } from "./lib/hook-context.js";
 
 const TIMEOUT_MS = 5000;
 const HARD_KILL_MS = 5500;
@@ -28,6 +28,14 @@ export async function main() {
   const sessionId = stdinData.sessionId || null;
   if (!sessionId) {
     debug("stop", "no sessionId — silent exit");
+    return;
+  }
+
+  // Memory-layer cloud egress gate (dec-RQtOzDnr). The Stop hook posts to
+  // /sessions/summarize, which is memory-related cloud egress. PM cloud sync
+  // (decisions/sprints/stories via MCP) uses separate paths and is unaffected.
+  if (await isStrictLocalMemory()) {
+    debug("stop", "strict_local_memory — skipping summarize POST");
     return;
   }
 
