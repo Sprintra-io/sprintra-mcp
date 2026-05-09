@@ -467,6 +467,133 @@ export function formatPastObservationsSection(hits) {
 }
 
 /**
+ * VP-1312 / dec-FFugQDPD — sync recent cloud session_digests into the local
+ * buffer at SessionStart. Closes the missing-producer gap: the Stop hook and
+ * end_with_digest path both write digests cloud-side only; without this sync
+ * the local cache stays empty forever and Phase 7's recall section never
+ * fires.
+ *
+ * Pulls user's last 10 non-private digests from the last 30 days via the
+ * existing GET /api/projects/:pid/session-digests endpoint (per-user-scoped
+ * by Bearer token). Idempotent — upsertSessionDigest dedupes on
+ * work_session_id, so re-runs are no-ops once the row is present. Drain
+ * worker's listDigestsNeedingEmbedding picks up new rows on its next
+ * PostToolUse pass and BLOB-caches the embedding.
+ *
+ * Skipped under strict_local_memory (no cloud egress).
+ * Failures degrade silently — Phase 7 sections are always optional.
+ *
+ * Returns { synced, skipped, total } where:
+ *   synced  = rows successfully upserted on this pass
+ *   skipped = rows that were already in local buffer (idempotent re-run)
+ *   total   = total rows returned by the cloud (or -1 on error)
+ */
+export async function syncCloudDigestsToLocal({ apiUrl, token, projectId }) {
+  const result = { synced: 0, skipped: 0, total: -1 };
+  if (!apiUrl || !token || !projectId) return result;
+
+  const buf = await loadBuffer();
+  if (!buf || typeof buf.upsertSessionDigest !== "function") {
+    debug("session-start", "digest-sync: buffer-sqlite unavailable — skipping");
+    return result;
+  }
+
+  const sinceTs = Date.now() - 30 * 24 * 60 * 60 * 1000;
+  const url = `${apiUrl.replace(/\/$/, "")}/api/projects/${encodeURIComponent(projectId)}/session-digests?since=${sinceTs}&limit=10`;
+  const headers = { accept: "application/json", authorization: `Bearer ${token}` };
+  const res = await httpRequest("GET", url, headers, null, 4000);
+  if (!res || !res.ok || !res.body) {
+    debug("session-start", `digest-sync: cloud GET status=${res?.status ?? "no-response"} — skipping`);
+    return result;
+  }
+
+  let parsed;
+  try {
+    parsed = typeof res.body === "string" ? JSON.parse(res.body) : res.body;
+  } catch {
+    debug("session-start", "digest-sync: cloud body not JSON — skipping");
+    return result;
+  }
+  const rows = Array.isArray(parsed?.session_digests) ? parsed.session_digests : [];
+  result.total = rows.length;
+  if (!rows.length) {
+    debug("session-start", "digest-sync: cloud returned 0 digests — skipping");
+    return result;
+  }
+
+  for (const row of rows) {
+    try {
+      // Map cloud response shape (rowToResponse from session-digests.ts) into
+      // the upsertSessionDigest input shape. Cloud uses camelCase plus a flat
+      // payload; local stores payload_json as a single JSON blob plus routing
+      // columns. Carry every Phase-5 field through so formatLocalDigestSection
+      // and digestContent can pick them up downstream.
+      const wsId = row.work_session_id || row.workSessionId || row.id;
+      if (!wsId) { result.skipped++; continue; }
+
+      const payload = {
+        what_was_discussed: row.what_was_discussed || row.whatWasDiscussed || "",
+        reasoning_summary: row.reasoning_summary || row.reasoningSummary || null,
+        key_decisions: row.key_decisions || row.keyDecisions || [],
+        open_questions: row.open_questions || row.openQuestions || [],
+        user_pushback: row.user_pushback || row.userPushback || [],
+        pending_asks: row.pending_asks || row.pendingAsks || [],
+        frustration_signals: row.frustration_signals || row.frustrationSignals || [],
+        links_to_artifacts: row.links_to_artifacts || row.linksToArtifacts || {},
+        sentiment: row.sentiment || "neutral",
+        status: row.status || "complete",
+        pinned: row.pinned === true,
+      };
+
+      const out = await buf.upsertSessionDigest({
+        digest_id: row.id || row.digest_id,
+        work_session_id: wsId,
+        project_id: projectId,
+        user_id: row.user_id || row.userId || null,
+        claude_session_id: row.claude_session_id || row.claudeSessionId || null,
+        payload,
+        private: false, // cloud already filtered private rows out
+      });
+      if (out?.updated) result.skipped++;
+      else result.synced++;
+    } catch (e) {
+      debug("session-start", `digest-sync: row error ${e?.message || e}`);
+    }
+  }
+
+  debug("session-start", `digest-sync: synced=${result.synced} skipped=${result.skipped} total=${result.total}`);
+  return result;
+}
+
+/**
+ * VP-1314 — fail-loud warning when local cache is empty AND cloud has
+ * eligible digests. Without this, Phase 7 silently produces nothing on the
+ * very first SessionStart after install, leaving users with no signal that
+ * recall is wired up. Prints one line to stderr — never affects briefing.
+ */
+export async function maybeWarnEmptyLocalCache({ apiUrl, token, syncResult }) {
+  if (!apiUrl || !token) return;
+  // If we already synced something on this pass the next run will have data;
+  // the warning would be misleading.
+  if ((syncResult?.synced ?? 0) > 0) return;
+  if ((syncResult?.skipped ?? 0) > 0) return;
+  if ((syncResult?.total ?? -1) <= 0) return;
+
+  try {
+    const url = `${apiUrl.replace(/\/$/, "")}/api/users/me/memory-stats`;
+    const res = await httpRequest("GET", url, { accept: "application/json", authorization: `Bearer ${token}` }, null, 2000);
+    if (!res?.ok || !res.body) return;
+    const parsed = typeof res.body === "string" ? JSON.parse(res.body) : res.body;
+    const eligible = parsed?.eligible_for_local_cache ?? 0;
+    if (eligible > 0) {
+      process.stderr.write(
+        `[sprintra] memory-layer: ${eligible} prior session(s) eligible for local recall — they will be cached on the next opportunistic drain.\n`,
+      );
+    }
+  } catch { /* silent */ }
+}
+
+/**
  * Top-level orchestration for the new "Relevant past observations" section.
  * Wraps every step in graceful-degrade try/catches — this section MUST be
  * fully optional. Returns the markdown string or "" if any step fails.
@@ -600,6 +727,26 @@ export async function main() {
   }
 
   let cloudBriefing = res.body;
+
+  // VP-1312 / dec-FFugQDPD — sync recent cloud digests into the local buffer
+  // BEFORE the local-first digest read + recall section run. Closes the
+  // missing-producer gap (Stop hook + end_with_digest both write cloud-only).
+  // Skipped under strict_local_memory. Idempotent; tolerates network failures.
+  let syncResult = { synced: 0, skipped: 0, total: -1 };
+  const strictLocalForSync = await isStrictLocalMemory();
+  if (!strictLocalForSync) {
+    try {
+      syncResult = await syncCloudDigestsToLocal({ apiUrl, token, projectId: project.project_id });
+    } catch (e) {
+      debug("session-start", `digest-sync: error ${e?.message || e}`);
+    }
+    // VP-1314 — only warn when sync ran and the cloud genuinely has no rows
+    // we could pull (eligible_for_local_cache > 0 but session-digests endpoint
+    // is filtering them out, e.g. very old digests beyond 30 days).
+    if (syncResult.total === 0) {
+      await maybeWarnEmptyLocalCache({ apiUrl, token, syncResult });
+    }
+  }
 
   // VP-1309 — local-first digest. Read the most recent digest from the local
   // SQLite buffer (Agent A's schema additions). The cloud briefing already

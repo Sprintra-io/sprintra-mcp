@@ -44,6 +44,7 @@ async function loadPhase6() {
     _phase6Modules = {
       enqueueEvent: buffer.enqueueEvent,
       drainBuffer: drain.drainBuffer,
+      drainSessionDigests: drain.drainSessionDigests,
       autoAttach: attach.autoAttach,
       UNATTACHED_PROJECT_ID: attach.UNATTACHED_PROJECT_ID,
       maybeFireCheckpoint: checkpoint.maybeFireCheckpoint,
@@ -109,7 +110,7 @@ async function legacyPath({ ctx, toolName, toolInput, toolResponse, sessionId, c
 async function phase6Path({ ctx, toolName, toolInput, toolResponse, sessionId, cwd }) {
   const phase6 = await loadPhase6();
   if (!phase6) return false;
-  const { enqueueEvent, drainBuffer, autoAttach, UNATTACHED_PROJECT_ID, maybeFireCheckpoint } = phase6;
+  const { enqueueEvent, drainBuffer, drainSessionDigests, autoAttach, UNATTACHED_PROJECT_ID, maybeFireCheckpoint } = phase6;
 
   // Resolve project (auto-attach if missing)
   let projectId = ctx?.project?.project_id;
@@ -169,6 +170,26 @@ async function phase6Path({ ctx, toolName, toolInput, toolResponse, sessionId, c
       debug("post-tool-use", `drained ${result.accepted}/${result.drained}${result.halted_reason ? ` (${result.halted_reason})` : ""}`);
     } catch (e) {
       debug("post-tool-use", `drain error: ${e.message}`);
+    }
+
+    // VP-1312 — also drain Phase 7 session digests + back-fill embeddings.
+    // Same opportunistic model as drainBuffer: cap batches + race-timeout.
+    // drainSessionDigests is the producer for the local cosine cache; without
+    // this call, the cache stays empty and the SessionStart "Relevant past
+    // observations" section never renders. Strict-local-memory short-circuits
+    // inside drainSessionDigests (no cloud egress).
+    try {
+      const dres = await Promise.race([
+        drainSessionDigests({ apiUrl: ctx.apiUrl, token: ctx.token, maxBatches: 1 }),
+        new Promise((resolve) =>
+          setTimeout(() => resolve({ drained: 0, accepted: 0, embedded: 0, halted_reason: "hook_timeout" }), 3000),
+        ),
+      ]);
+      if (dres.drained > 0 || dres.embedded > 0) {
+        debug("post-tool-use", `digests drained=${dres.drained} embedded=${dres.embedded}${dres.halted_reason ? ` (${dres.halted_reason})` : ""}`);
+      }
+    } catch (e) {
+      debug("post-tool-use", `digest-drain error: ${e.message}`);
     }
   }
   return true;

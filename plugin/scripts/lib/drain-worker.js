@@ -332,33 +332,43 @@ async function uploadDigest(row, { apiUrl, token }) {
  * /api/embed proxy (which wraps the existing callGeminiEmbedding function
  * that powers search.semantic). Returns a Buffer (Float32 LE) or null.
  *
+ * VP-1315: this MUST use fetch().arrayBuffer() directly instead of the
+ * shared httpRequest helper. The shared helper does `await res.text()`
+ * (UTF-8 decode), which corrupts raw octet-stream binary — bytes that
+ * aren't valid UTF-8 collapse into U+FFFD, multi-byte sequences mash
+ * together, and the resulting Buffer is no longer the original Float32
+ * payload. arrayBuffer() preserves raw bytes verbatim.
+ *
  * Network failures, missing API key (503), and bad responses all fold to
  * `null` — the caller treats embedding cache as best-effort and retries
  * next drain pass.
  */
 async function fetchEmbedding(text, { apiUrl, token }) {
   if (!text || !apiUrl || !token) return null;
-  const res = await httpRequest(
-    "POST",
-    `${apiUrl}/api/embed`,
-    {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-      Accept: "application/octet-stream",
-    },
-    { text },
-    8000,
-  );
-  if (!res || !res.ok) return null;
-
-  // httpRequest returns body as string. The /api/embed route ships
-  // raw Float32 LE bytes; restore via latin1 (1:1 byte mapping).
-  // If the underlying fetch returned a non-binary body, length will not
-  // be a multiple of 4 and we'll bail out cleanly.
-  if (typeof res.body !== "string" || !res.body.length) return null;
-  const buf = Buffer.from(res.body, "latin1");
-  if (buf.byteLength === 0 || buf.byteLength % 4 !== 0) return null;
-  return buf;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 8000);
+  try {
+    const res = await fetch(`${apiUrl}/api/embed`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+        Accept: "application/octet-stream",
+      },
+      body: JSON.stringify({ text }),
+      signal: ctrl.signal,
+      keepalive: false,
+    });
+    if (!res.ok) return null;
+    const ab = await res.arrayBuffer();
+    const buf = Buffer.from(ab);
+    if (buf.byteLength === 0 || buf.byteLength % 4 !== 0) return null;
+    return buf;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**

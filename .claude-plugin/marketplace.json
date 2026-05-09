@@ -13,9 +13,8 @@
   "plugins": [
     {
       "name": "sprintra",
-      "version": "1.6.0",
-      "source": "./plugin",
-      "description": "Memory Layer Phase 7 — local-first semantic recall over your past Claude Code sessions at zero added LLM cost. SessionStart briefing now surfaces top-N relevant past observations via local cosine search over cached embeddings. New `<private>` tag on a prompt skips capture entirely; strict_local_memory config flag disables memory cloud egress (project sync unaffected). Phase 6 continuous capture stays on by default: local SQLite buffer survives Wi-Fi flaps + crashes; secrets redacted before disk; auto-attaches unmarked repos; crash recovery from local transcripts. Plus SessionStart briefing, UserPromptSubmit + PostToolUse capture, Stop digest, 6 PM skills, 20 MCP tools."
+      "version": "1.6.1",
+      "source": "./plugin"
     }
   ]
 }

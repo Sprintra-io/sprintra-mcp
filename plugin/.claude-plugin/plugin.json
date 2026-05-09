@@ -1,7 +1,6 @@
 {
   "name": "sprintra",
-  "version": "1.6.0",
-  "description": "Memory Layer Phase 7 — local-first semantic recall via brute-force JS cosine over cloud-cached Gemini embeddings. Zero added LLM cost, zero new dependencies. Hybrid SessionStart briefing: project context (cloud) + last-session digest (local-first) + relevant past observations (local cosine). New user gestures: `<private>` tag prefix skips capture entirely; strict_local_memory config flag disables memory cloud egress (project sync unaffected). Phase 6 continuous capture stays on by default — local SQLite buffer survives Wi-Fi flaps + crashes, redacts secrets before disk write, auto-attaches unmarked repos, recovers crashed sessions from local transcripts. Plus SessionStart briefing, UserPromptSubmit + PostToolUse capture, Stop digest, SessionEnd cleanup, 6 PM workflow skills.",
+  "version": "1.6.1",
   "author": {
     "name": "Sprintra",
     "email": "support@sprintra.io",
